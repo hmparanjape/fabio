@@ -14,8 +14,8 @@
 # Get ready for python3:
 from __future__ import with_statement, print_function, division
 
-__authors__ = ["Antonino Miceli" , "Jon Wright", "Jérôme Kieffer"]
-__date__ = "03/02/2015"
+__authors__ = ["Antonino Miceli" , "Jon Wright", "Jérôme Kieffer", "Harshad Paranjape"]
+__date__ = "07/17/2015"
 __status__ = "production"
 __copyright__ = "2007 APS; 2010-2015 ESRF"
 __licence__ = "GPL"
@@ -186,10 +186,54 @@ GE_HEADER_INFO = [
     ('Comment', 200, None)
     ]
 
-
 class GEimage(fabioimage):
 
-    _need_a_seek_to_read = True
+    def __init__(self,
+                 NumberOfFrames=None, NumberOfRowsInFrame=None, NumberOfColsInFrame=None,
+                 StandardHeaderSizeInBytes=None, UserHeaderSizeInBytes=None,
+                 ImageDepthInBits=None):
+        """
+        Initialize GEimage with bare minimums. We don't want to rely on header
+        for everything. We will accept params from user for number of frames, 
+        number of rows/columns etc.
+        """
+
+        self._need_a_seek_to_read = True
+
+        if NumberOfFrames is not None:
+            self.NumberOfFrames = NumberOfFrames
+        else:
+            self.NumberOfFrames = 1
+
+        if NumberOfRowsInFrame is not None:
+            self.NumberOfRowsInFrame = NumberOfRowsInFrame
+        else:
+            self.NumberOfRowsInFrame = 2048
+
+        if NumberOfColsInFrame is not None:
+            self.NumberOfColsInFrame = NumberOfColsInFrame
+        else:
+            self.NumberOfColsInFrame = 2048
+
+        if StandardHeaderSizeInBytes is not None:
+            self.StandardHeaderSizeInBytes = StandardHeaderSizeInBytes
+        else:
+            self.StandardHeaderSizeInBytes = 8192
+
+        if UserHeaderSizeInBytes is not None:
+            self.UserHeaderSizeInBytes = UserHeaderSizeInBytes
+        else:
+            self.UserHeaderSizeInBytes = 0
+
+        if ImageDepthInBits is not None:
+            self.ImageDepthInBits = ImageDepthInBits
+        else:
+            self.ImageDepthInBits = 16
+
+        self.NumberOfBytesInFrame = self.NumberOfRowsInFrame * \
+            self.NumberOfColsInFrame * \
+            self.ImageDepthInBits // 8
+
 
     def _readheader(self, infile):
         """ Read a GE image header """
@@ -204,57 +248,61 @@ class GEimage(fabioimage):
                 self.header[ name ] = struct.unpack(format,
                                                      infile.read(nbytes))[0]
 
-    def read(self, fname, frame=None):
+    def read(self, fname, frame=None, readHeaderData=False):
         """
         Read in header into self.header and
         the data   into self.data
         """
         if frame is None:
             frame = 0
-        self.header = {}
-        self.resetvals()
+
+
         infile = self._open(fname, "rb")
         self.sequencefilename = fname
-        self._readheader(infile)
-        self.nframes = self.header['NumberOfFrames']
+
+        if readHeaderData:
+            self.header = {}
+            self.resetvals()
+            self._readheader(infile)
+            self.nframes = self.header['NumberOfFrames']
+
         self._readframe(infile, frame)
         infile.close()
+
         return self
 
     def _makeframename(self):
-        """ The thing to be printed for the user to represent a frame inside
-        a file """
-        self.filename = "%s$%04d" % (self.sequencefilename,
-                                   self.currentframe)
+        """ 
+        Generate a frame name string by concatenating file name with
+        fixed-width frame number
+        """
+        self.frameName = "%s$%04d" % (self.sequencefilename,
+                                     self.currentframe)
 
     def _readframe(self, filepointer, img_num):
         """
-        # Load only one image from the sequence
-        #    Note: the first image in the sequence 0
-        # raises an exception if you give an invalid image
-        # otherwise fills in self.data
+        Read a single frame from the image. The first image in the sequence is 0.
+        This raises an exception if you give an invalid image; 
+        otherwise fills in self.data
         """
-        if(img_num > self.nframes or img_num < 0):
-            raise Exception("Bad image number")
-        imgstart = self.header['StandardHeaderSizeInBytes'] + \
-                   self.header['UserHeaderSizeInBytes'] + \
-                   img_num * self.header['NumberOfRowsInFrame'] * \
-                   self.header['NumberOfColsInFrame'] * \
-                   self.header['ImageDepthInBits'] // 8
-        # whence = 0 means seek from start of file
+        # Throw an exception for unusual frame number
+        if(img_num > self.nframes):
+            raise Exception("Image number out of bounds")
+        else if(img_num < 0):
+            raise Exception("Negative image number is not supported")
+        # Determine at which point the frame data starts
+        imgstart = self.StandardHeaderSizeInBytes + \
+                   self.UserHeaderSizeInBytes + \
+                   img_num * self.NumberOfBytesInFrame
+        # Seek to the appropriate position from the beginning
         filepointer.seek(imgstart, 0)
-
-        self.bpp = self.header['ImageDepthInBits'] // 8  # hopefully 2
-        imglength = self.header['NumberOfRowsInFrame'] * \
-                    self.header['NumberOfColsInFrame'] * self.bpp
-        if self.bpp != 2:
-            logging.warning("Using uint16 for GE but seems to be wrong, bpp=%s" % self.bpp)
-
-        data = numpy.fromstring(filepointer.read(imglength), numpy.uint16)
+        # Read the data in
+        data = numpy.fromstring(filepointer.read(self.NumberofBytesInFrame), numpy.uint16)
+        # Take care on endianness
         if not numpy.little_endian:
             data.byteswap(True)
-        data.shape = (self.header['NumberOfRowsInFrame'],
-                            self.header['NumberOfColsInFrame'])
+
+        data.shape = (self.NumberOfRowsInFrame, self.NumberOfColsInFrame)
         self.data = data
         self.dim2 , self.dim1 = self.data.shape
         self.currentframe = int(img_num)
