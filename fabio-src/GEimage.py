@@ -22,7 +22,9 @@ __licence__ = "GPL"
 
 
 import numpy
-import struct, logging
+import struct
+import logging
+import os
 logger = logging.getLogger("GEimage")
 from .fabioimage import fabioimage
 from .fabioutils import next_filename, previous_filename
@@ -188,7 +190,7 @@ GE_HEADER_INFO = [
 
 class GEimage(fabioimage):
 
-    def __init__(self,
+    def __init__(self, filename=None,
                  NumberOfFrames=None, NumberOfRowsInFrame=None, NumberOfColsInFrame=None,
                  StandardHeaderSizeInBytes=None, UserHeaderSizeInBytes=None,
                  ImageDepthInBits=None):
@@ -199,40 +201,82 @@ class GEimage(fabioimage):
         """
 
         self._need_a_seek_to_read = True
+        self.header = {}
 
-        if NumberOfFrames is not None:
-            self.NumberOfFrames = NumberOfFrames
-        else:
-            self.NumberOfFrames = 1
+        if filename is not None:
+            self.filename = filename
 
-        if NumberOfRowsInFrame is not None:
-            self.NumberOfRowsInFrame = NumberOfRowsInFrame
-        else:
-            self.NumberOfRowsInFrame = 2048
-
-        if NumberOfColsInFrame is not None:
-            self.NumberOfColsInFrame = NumberOfColsInFrame
-        else:
-            self.NumberOfColsInFrame = 2048
 
         if StandardHeaderSizeInBytes is not None:
-            self.StandardHeaderSizeInBytes = StandardHeaderSizeInBytes
+            self.header['StandardHeaderSizeInBytes'] = StandardHeaderSizeInBytes
         else:
-            self.StandardHeaderSizeInBytes = 8192
+            self.header['StandardHeaderSizeInBytes'] = 8192
 
         if UserHeaderSizeInBytes is not None:
-            self.UserHeaderSizeInBytes = UserHeaderSizeInBytes
+            self.header['UserHeaderSizeInBytes'] = UserHeaderSizeInBytes
         else:
-            self.UserHeaderSizeInBytes = 0
+            self.header['UserHeaderSizeInBytes'] = 0
+
+        if NumberOfRowsInFrame is not None:
+            self.header['NumberOfRowsInFrame'] = NumberOfRowsInFrame
+        else:
+            self.header['NumberOfRowsInFrame'] = 2048
+
+        if NumberOfColsInFrame is not None:
+            self.header['NumberOfColsInFrame'] = NumberOfColsInFrame
+        else:
+            self.header['NumberOfColsInFrame'] = 2048
 
         if ImageDepthInBits is not None:
-            self.ImageDepthInBits = ImageDepthInBits
+            self.header['ImageDepthInBits'] = ImageDepthInBits
         else:
-            self.ImageDepthInBits = 16
+            self.header['ImageDepthInBits'] = 16
 
-        self.NumberOfBytesInFrame = self.NumberOfRowsInFrame * \
-            self.NumberOfColsInFrame * \
-            self.ImageDepthInBits // 8
+        self.NumberOfBytesInFrame = self.header['NumberOfRowsInFrame'] * \
+            self.header['NumberOfColsInFrame'] * \
+            self.header['ImageDepthInBits'] // 8
+
+        if NumberOfFrames is not None:
+            self.header['NumberOfFrames'] = NumberOfFrames
+            self.nframes = NumberOfFrames
+        else:
+            if self.filename is not None:
+                self.header['NumberOfFrames'] = self.getNFrames()
+                self.nframes = self.getNFrames()
+            else:
+                self.header['NumberOfFrames'] = 1
+                self.nframes = 1
+
+
+    def getNFrames(self):
+        """
+        Get number of frames in the file from file size
+        """
+        fileBytes = os.stat(self.filename).st_size
+        nbytesFrame = self.NumberOfBytesInFrame
+        nbytesHeader = self.header['StandardHeaderSizeInBytes']
+
+        assert (fileBytes - nbytesHeader) % nbytesFrame == 0,\
+            'file size not correct'
+        nFrames = int((fileBytes - nbytesHeader) / nbytesFrame)
+        if nFrames*nbytesFrame + nbytesHeader != fileBytes:
+            raise RuntimeError, 'file size not correctly calculated'
+
+        #nFrames = self.getNFramesFromBytes(fileBytes, self.header['StandardHeaderSizeInBytes'], self.NumberOfBytesInFrame)
+
+        return nFrames
+
+    def getNFramesFromBytes(fileBytes, nbytesHeader, nbytesFrame):
+        """
+        Calculate number of frames from total bytes, 
+        header bytes and bytes in a frame
+        """
+        assert (fileBytes - nbytesHeader) % nbytesFrame == 0,\
+            'file size not correct'
+        nFrames = int((fileBytes - nbytesHeader) / nbytesFrame)
+        if nFrames*nbytesFrame + nbytesHeader != fileBytes:
+            raise RuntimeError, 'file size not correctly calculated'
+        return nFrames
 
 
     def _readheader(self, infile):
@@ -248,25 +292,33 @@ class GEimage(fabioimage):
                 self.header[ name ] = struct.unpack(format,
                                                      infile.read(nbytes))[0]
 
-    def read(self, fname, frame=None, readHeaderData=False):
+    def read(self, fname=None, frame=None, readHeaderData=False):
         """
         Read in header into self.header and
         the data   into self.data
         """
-        if frame is None:
-            frame = 0
 
-
-        infile = self._open(fname, "rb")
-        self.sequencefilename = fname
-
+        if fname is None and self.filename is None:
+            raise RuntimeError, "No file to read"
+        elif fname is None:
+            fname = self.filename
+        
         if readHeaderData:
             self.header = {}
             self.resetvals()
             self._readheader(infile)
             self.nframes = self.header['NumberOfFrames']
 
-        self._readframe(infile, frame)
+        infile = self._open(fname, "rb")
+        self.sequencefilename = fname
+
+        if frame is None:
+            print('Reading %d frames from %s' % (self.header['NumberOfFrames'], fname))
+            self._readstack(infile)
+        else:
+            print('Reading frame %d from %s' % (frame, fname))
+            self._readframe(infile, frame)
+
         infile.close()
 
         return self
@@ -277,7 +329,7 @@ class GEimage(fabioimage):
         fixed-width frame number
         """
         self.frameName = "%s$%04d" % (self.sequencefilename,
-                                     self.currentframe)
+                                     self.currentFrameNum)
 
     def _readframe(self, filepointer, img_num):
         """
@@ -288,37 +340,69 @@ class GEimage(fabioimage):
         # Throw an exception for unusual frame number
         if(img_num > self.nframes):
             raise Exception("Image number out of bounds")
-        else if(img_num < 0):
+        elif(img_num < 0):
             raise Exception("Negative image number is not supported")
         # Determine at which point the frame data starts
-        imgstart = self.StandardHeaderSizeInBytes + \
-                   self.UserHeaderSizeInBytes + \
+        imgstart = self.header['StandardHeaderSizeInBytes'] + \
+                   self.header['UserHeaderSizeInBytes'] + \
                    img_num * self.NumberOfBytesInFrame
         # Seek to the appropriate position from the beginning
         filepointer.seek(imgstart, 0)
-        # Read the data in
-        data = numpy.fromstring(filepointer.read(self.NumberofBytesInFrame), numpy.uint16)
+        # Read the data in        
+        data = numpy.fromfile(filepointer, count=self.header['NumberOfRowsInFrame']*self.header['NumberOfColsInFrame'], dtype=numpy.uint16).reshape(self.header['NumberOfRowsInFrame'], self.header['NumberOfColsInFrame'])
         # Take care on endianness
         if not numpy.little_endian:
             data.byteswap(True)
 
-        data.shape = (self.NumberOfRowsInFrame, self.NumberOfColsInFrame)
+        data.shape = (self.header['NumberOfRowsInFrame'], self.header['NumberOfColsInFrame'])
         self.data = data
         self.dim2 , self.dim1 = self.data.shape
-        self.currentframe = int(img_num)
+        self.currentFrameNum = int(img_num)
         self._makeframename()
 
+    def _readstack(self, filepointer):
+        """
+        Read a stack of frames into a 3D data array
+        """
+        # Determine at which point the frame data starts
+        imgstart = self.header['StandardHeaderSizeInBytes'] + \
+                   self.header['UserHeaderSizeInBytes']
 
-    def write(self, fname, force_type=numpy.uint16):
+        # Seek to the appropriate position from the beginning
+        filepointer.seek(imgstart, 0)
+        # Read the data in        
+        data = numpy.fromfile(filepointer, count=self.header['NumberOfRowsInFrame']*self.header['NumberOfColsInFrame']*self.header['NumberOfFrames'], dtype=numpy.uint16).reshape(self.header['NumberOfFrames'], self.header['NumberOfRowsInFrame'], self.header['NumberOfColsInFrame'])
+        # Take care on endianness
+        if not numpy.little_endian:
+            data.byteswap(True)
+
+        data.shape = (self.header['NumberOfFrames'], self.header['NumberOfRowsInFrame'], self.header['NumberOfColsInFrame'])
+        self.data = data
+        self.dim1 , self.dim2, self.dim3 = self.data.shape
+        self.currentFrameNum = 0
+
+    def write(self, fname=None, force_type=numpy.uint16):
         """ Not yet implemented"""
-        raise Exception("Write is not implemented")
+#        raise Exception("Write is not implemented")
+        if fname is None and self.filename is None:
+            raise RuntimeError, "There is no file to write to."
+        elif fname is None:
+            fname = self.filename
 
-    def getframe(self, num):
+#        print("Writing data of shape [%d]" % (self.data.shape))
+        self.data.tofile(fname)
+
+    def getframe(self, img_num):
         """
         Returns a frame as a new fabioimage object
         """
-        if num < 0 or num > self.nframes:
-            raise Exception("Requested frame number is out of range")
+
+        # Throw an exception for unusual frame number
+        if(img_num > self.nframes):
+            raise Exception("Image number out of bounds")
+        elif(img_num < 0):
+            raise Exception("Negative image number is not supported")
+
         # Do a deep copy of the header to make a new one
         newheader = {}
         for k in self.header.keys():
@@ -327,7 +411,7 @@ class GEimage(fabioimage):
         frame.nframes = self.nframes
         frame.sequencefilename = self.sequencefilename
         infile = frame._open(self.sequencefilename, "rb")
-        frame._readframe(infile, num)
+        frame._readframe(infile, img_num)
         infile.close()
         return frame
 
@@ -335,8 +419,8 @@ class GEimage(fabioimage):
         """
         Get the next image in a series as a fabio image
         """
-        if self.currentframe < (self.nframes - 1) and self.nframes > 1:
-            return self.getframe(self.currentframe + 1)
+        if self.currentFrameNum < (self.nframes - 1) and self.nframes > 1:
+            return self.getframe(self.currentFrameNum + 1)
         else:
             newobj = GEimage()
             newobj.read(next_filename(
@@ -347,8 +431,8 @@ class GEimage(fabioimage):
         """
         Get the previous image in a series as a fabio image
         """
-        if self.currentframe > 0:
-            return self.getframe(self.currentframe - 1)
+        if self.currentFrameNum > 0:
+            return self.getframe(self.currentFrameNum - 1)
         else:
             newobj = GEimage()
             newobj.read(previous_filename(
@@ -381,7 +465,7 @@ def demo():
         start = time.time()
         try:
             sequence1 = sequence1.next()
-            print(sequence1.currentframe, sequence1.data.ravel().mean(), \
+            print(sequence1.currentFrameNum, sequence1.data.ravel().mean(), \
                   time.time() - start)
         except Exception as  ex:
             raise ex
